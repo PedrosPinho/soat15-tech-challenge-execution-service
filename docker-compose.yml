@@ -1,0 +1,44 @@
+services:
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: execution-service-localstack
+    restart: unless-stopped
+    ports:
+      - '4566:4566'
+    environment:
+      SERVICES: sqs,sns,dynamodb
+      AWS_DEFAULT_REGION: us-east-1
+    networks:
+      - oficina-network
+    healthcheck:
+      test: awslocal sqs list-queues
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: execution-service
+    restart: unless-stopped
+    ports:
+      - '3002:3001'
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DYNAMODB_TABLE: execucoes
+      JWT_SECRET: change-this-in-production
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - oficina-network
+
+networks:
+  oficina-network:
+    driver: bridge
