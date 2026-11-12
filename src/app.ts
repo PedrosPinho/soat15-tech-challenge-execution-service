@@ -6,11 +6,15 @@ import swaggerUi from 'swagger-ui-express';
 import { correlationIdMiddleware } from '@presentation/middlewares/correlation-id.middleware';
 import { errorHandler } from '@presentation/middlewares/error.middleware';
 import { createHealthRouter, ReadinessProbe } from '@presentation/routes/health.routes';
+import { createExecucaoRouter } from '@presentation/routes/execucao.routes';
+import { ExecucaoController } from '@presentation/controllers/execucao.controller';
 import { swaggerSpec, swaggerUiOptions, DOCS_PATH } from './swagger';
 
 export interface AppDependencies {
   /** Dependência cuja conectividade define a readiness do pod (banco, DynamoDB...). */
   readiness?: ReadinessProbe;
+  /** Controller das rotas de negócio; ausente em testes que só exercitam a infraestrutura HTTP. */
+  execucaoController?: ExecucaoController;
 }
 
 /**
@@ -39,6 +43,9 @@ export const createApp = (deps: AppDependencies = {}): Application => {
   app.get(`${DOCS_PATH}.json`, (_req, res) => res.json(swaggerSpec));
 
   app.use('/health', createHealthRouter(deps.readiness));
+  if (deps.execucaoController) {
+    app.use('/api/execucoes', createExecucaoRouter(deps.execucaoController));
+  }
 
   app.use(errorHandler);
   return app;
