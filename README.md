@@ -67,6 +67,25 @@ O relay lê o outbox por um índice esparso (GSI3), reivindica cada item com um 
 com backoff exponencial. Uma trava `OSLOCK#<osId>` garante uma execução por OS mesmo com comandos concorrentes.
 Modelo de chaves: [`keys.ts`](src/infrastructure/database/dynamodb/keys.ts).
 
+## Posição na solução
+
+```mermaid
+flowchart LR
+  OS[OS Service<br/>orquestrador] -- "SolicitarDiagnostico · IniciarReparo · CancelarExecucao" --> Q[[SQS execution-commands]] --> EX
+  Mecanico([Mecânico]) --> APIGW[API Gateway] --> ALB[ALB interno] --> EX
+  subgraph EX[Execution Service]
+    H[Handler de comandos] --> T[(DynamoDB<br/>execucoes)]
+    API["API /api/execucoes"] --> T
+    T --- OB["outbox (GSI3 esparso) → relay"]
+  end
+  EX -- "DiagnosticoIniciado/Concluido/Falhou<br/>ReparoIniciado/Concluido/Falhou<br/>ExecucaoCancelada" --> SNS{{SNS oficina-eventos}} --> OS
+```
+
+Sequência da Saga: [`sequence-saga-feliz.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/sequence-saga-feliz.md) ·
+[`sequence-saga-compensacao.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/sequence-saga-compensacao.md). Modelo single-table:
+[`data-model.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/data-model.md) (seção Execution).
+
+
 ## Arquitetura do serviço
 
 ```
@@ -94,6 +113,8 @@ npm run dev                                # http://localhost:3001
 
 Subir tudo (LocalStack + API, porta 3002): `docker compose up --build`. Modos: `MESSAGING_DRIVER=memory` roda sem AWS; `MESSAGING_ENABLED=false` roda só a API.
 
+Ambiente completo com os 3 serviços: `docker-compose.integration.yml` e `scripts/smoke-fluxo-feliz.sh` no repositório do OS Service.
+
 Testes: `npm test` · cobertura: `npm run test:coverage` (threshold 80%) · lint: `npm run lint` · tipos: `npm run type-check`.
 
 ## Qualidade, CI/CD e cobertura
@@ -104,6 +125,16 @@ Testes: `npm test` · cobertura: `npm run test:coverage` (threshold 80%) · lint
 - Infra do serviço em [`terraform/`](terraform) (estado remoto S3, workspaces `homolog`/`prod`) e manifests em [`k8s/`](k8s). Requer o `apply` prévio do OS Service (dono do tópico `oficina-eventos`).
 - Evidência de cobertura: _a preencher_ (badge SonarCloud + relatório do CI).
 - `main` e `homolog` protegidas: PR obrigatório e status checks `Build`, `Test` e `Sonar` (`scripts/protect-branches.sh` no repo do OS Service aplica). `destroy.yml` (manual) remove workloads e infra do serviço.
+
+## Cobertura e documentação da API
+
+- **Cobertura**: 98,8 % de linhas · 95,3 % de branches · 97,8 % de funções (`npm run test:coverage`, sem o teste de integração
+  com LocalStack; mínimo exigido 80 %). O CI publica o relatório e o SonarCloud aplica o quality gate.
+- **Contratos**: `tests/contracts/` — consome os comandos reais do OS (`os-commands.json`) e produz os eventos que o OS consome
+  (`execution-events.json`); ver o README do OS Service, seção Testes.
+- **Swagger**: `/api/execucoes/docs`. **Postman do fluxo completo** (3 serviços, variáveis encadeadas):
+  [`oficina-fase4-fluxo-completo.postman_collection.json`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/postman/oficina-fase4-fluxo-completo.postman_collection.json).
+
 
 ## Documentação da arquitetura
 
