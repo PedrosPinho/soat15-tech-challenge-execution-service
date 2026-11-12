@@ -30,6 +30,7 @@ const startServer = async (): Promise<void> => {
     // MESSAGING_ENABLED=false roda só a API (útil para depurar sem filas).
     if (process.env.MESSAGING_ENABLED !== 'false') {
       runtime.relay.start();
+      runtime.queueDepth?.start();
       subscription = await runtime.bus.subscribe(Destinations.ExecutionCommands, (envelope) =>
         runtime.commandHandler.handle(envelope),
       );
@@ -46,6 +47,7 @@ const shutdown = async (signal: string): Promise<void> => {
   httpServer?.close();
   await subscription?.stop();
   await runtime.relay.stop();
+  await runtime.queueDepth?.stop();
   process.exit(0);
 };
 

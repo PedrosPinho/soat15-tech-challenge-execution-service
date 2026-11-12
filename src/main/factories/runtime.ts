@@ -8,6 +8,7 @@ import { ExecucaoUseCases } from '@application/use-cases/execucao.use-cases';
 import { IMessageBus } from '@domain/services/message-bus';
 import { DynamoExecucaoRepository } from '@infrastructure/database/dynamodb/dynamo-execucao.repository';
 import { DynamoOutboxRepository } from '@infrastructure/database/dynamodb/dynamo-outbox.repository';
+import { filaComDlq, QueueDepthCollector } from '@infrastructure/messaging/queue-depth-collector';
 import { InMemoryMessageBus } from '@infrastructure/messaging/in-memory-message-bus';
 import { SqsSnsMessageBus } from '@infrastructure/messaging/sqs-sns-message-bus';
 import { ExecucaoController } from '@presentation/controllers/execucao.controller';
@@ -44,6 +45,8 @@ export interface Runtime {
   commandHandler: ExecutionCommandHandler;
   relay: OutboxRelay;
   bus: IMessageBus;
+  /** Mede filas/DLQs (só com SQS real). */
+  queueDepth?: QueueDepthCollector;
 }
 
 /** Composition root do serviço. */
@@ -52,7 +55,17 @@ export const makeRuntime = (bus: IMessageBus = makeMessageBus()): Runtime => {
   const table = process.env.DYNAMODB_TABLE ?? 'execucoes';
   const repository = new DynamoExecucaoRepository(doc, table);
   const outbox = new DynamoOutboxRepository(doc, table);
+  const queueDepth =
+    bus instanceof SqsSnsMessageBus
+      ? new QueueDepthCollector(
+          new SQSClient({ region: process.env.AWS_REGION ?? 'us-east-1' }),
+          'execution-service',
+          filaComDlq(Destinations.ExecutionCommands, required('EXECUTION_COMMANDS_QUEUE_URL')),
+          Number(process.env.QUEUE_DEPTH_INTERVAL_MS ?? 60_000),
+        )
+      : undefined;
   return {
+    queueDepth,
     repository,
     bus,
     controller: new ExecucaoController(new ExecucaoUseCases(repository)),
