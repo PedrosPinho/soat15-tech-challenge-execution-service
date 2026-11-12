@@ -8,10 +8,12 @@ services:
     environment:
       SERVICES: sqs,sns,dynamodb
       AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
     networks:
       - oficina-network
     healthcheck:
-      test: awslocal sqs list-queues
+      test: awslocal dynamodb describe-table --table-name execucoes
       interval: 10s
       timeout: 5s
       retries: 10
@@ -28,6 +30,9 @@ services:
       NODE_ENV: production
       PORT: 3001
       DYNAMODB_TABLE: execucoes
+      MESSAGING_DRIVER: sqs
+      EXECUTION_COMMANDS_QUEUE_URL: http://localstack:4566/000000000000/execution-commands
+      EVENTS_TOPIC_ARN: arn:aws:sns:us-east-1:000000000000:oficina-eventos
       JWT_SECRET: change-this-in-production
       AWS_REGION: us-east-1
       AWS_ENDPOINT_URL: http://localstack:4566

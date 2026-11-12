@@ -1,8 +1,16 @@
-name: CI
+name: CI/CD
 
-# Esqueleto (Fase 4, Etapa 1): build + testes. SonarCloud, Terraform, build/push no ECR e
-# deploy no EKS entram na Etapa 8 (ver PHASE_4_PLAN.md no repo soat15-tech-challenge-01).
-# Os nomes dos jobs (`Build`, `Test`) são os status checks obrigatórios da branch protection.
+# Pipeline do Execution Service (Fase 4). Mesmo desenho do OS Service: homolog e produção
+# compartilham o EKS, separados por namespace — branch homolog -> oficina-homolog, main ->
+# oficina-prod. Em `main` o Terraform só faz `plan` e o deploy falha de propósito
+# (ADR-007: prod não é implantado de verdade, continue-on-error).
+#
+# Credenciais: sessão temporária do AWS Academy Learner Lab em GitHub Secrets (sem OIDC),
+# renovadas por scripts/refresh-aws-secrets.sh (repo k8s-infra) no início de cada sessão.
+# Ordem de deploy: o OS Service precisa ter feito apply antes (dono do tópico oficina-eventos,
+# lido via terraform_remote_state).
+#
+# Os nomes dos jobs `Build` e `Test` são os status checks obrigatórios da branch protection.
 
 on:
   push:
@@ -12,6 +20,11 @@ on:
 
 permissions:
   contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: soat15-tc-execution-service
+  EKS_CLUSTER_NAME: soat15-tc-cluster
 
 jobs:
   build:
@@ -31,9 +44,23 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      # DynamoDB/SQS/SNS reais para tests/integration-localstack.spec.ts.
+      localstack:
+        image: localstack/localstack:3.8
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: sqs,sns,dynamodb
+        options: >-
+          --health-cmd "curl -fs http://localhost:4566/_localstack/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     env:
       NODE_ENV: test
       JWT_SECRET: ci-test-jwt-secret
+      LOCALSTACK_ENDPOINT: http://localhost:4566
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -63,3 +90,177 @@ jobs:
           name: coverage-report
           path: coverage/
           retention-days: 7
+
+  terraform-validate:
+    name: Terraform (fmt + validate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+
+  terraform-apply:
+    name: Terraform (ECR + DynamoDB + fila de comandos)
+    needs: [build, test, terraform-validate]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'homolog' }}
+    outputs:
+      dynamodb_table_name: ${{ steps.out.outputs.dynamodb_table_name }}
+      execution_commands_queue_url: ${{ steps.out.outputs.execution_commands_queue_url }}
+      events_topic_arn: ${{ steps.out.outputs.events_topic_arn }}
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: terraform init
+      - name: Selecionar workspace
+        run: |
+          ENV=homolog
+          [ "${{ github.ref_name }}" = "main" ] && ENV=prod
+          terraform workspace select -or-create "$ENV"
+      - name: Apply (só em homolog)
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            terraform plan -input=false
+          else
+            terraform apply -auto-approve -input=false
+          fi
+      - name: Saídas (tabela, fila e tópico para o deploy)
+        id: out
+        run: |
+          {
+            echo "dynamodb_table_name=$(terraform output -raw dynamodb_table_name 2>/dev/null || true)"
+            echo "execution_commands_queue_url=$(terraform output -raw execution_commands_queue_url 2>/dev/null || true)"
+            echo "events_topic_arn=$(terraform output -raw events_topic_arn 2>/dev/null || true)"
+          } >> "$GITHUB_OUTPUT"
+
+  docker-build-push:
+    name: Build & Push (ECR)
+    needs: [build, test, terraform-apply]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - id: image
+        run: echo "image=${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy (EKS)
+    needs: [docker-build-push, terraform-apply]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'homolog' }}
+    # Em `main` as saídas do Terraform ficam vazias (só há `plan`) e este job falha de
+    # propósito — continue-on-error marca a falha esperada (ADR-007).
+    continue-on-error: ${{ github.ref_name == 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --name "${{ env.EKS_CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}"
+
+      - name: Definir namespace/ambiente
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "NAMESPACE=oficina-prod" >> "$GITHUB_ENV"
+            echo "TF_ENV=prod" >> "$GITHUB_ENV"
+          else
+            echo "NAMESPACE=oficina-homolog" >> "$GITHUB_ENV"
+            echo "TF_ENV=homolog" >> "$GITHUB_ENV"
+          fi
+
+      - name: Namespace
+        run: |
+          sed "s/namespace: oficina$/namespace: $NAMESPACE/" k8s/namespace.yaml | \
+            sed "s/name: oficina$/name: $NAMESPACE/" | kubectl apply -f -
+
+      - name: Secret (JWT_SECRET vem do SSM — nunca em arquivo)
+        run: |
+          JWT_SECRET=$(aws ssm get-parameter --name "/soat15-tc/${TF_ENV}/jwt-secret" --with-decryption --query 'Parameter.Value' --output text)
+          kubectl create secret generic execution-service-secret -n "$NAMESPACE" \
+            --from-literal=JWT_SECRET="$JWT_SECRET" \
+            --from-literal=NEW_RELIC_LICENSE_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}" \
+            --from-literal=NEW_RELIC_APP_NAME="execution-service-${TF_ENV}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: ConfigMaps (estático + saídas do Terraform)
+        run: |
+          sed "s/namespace: oficina$/namespace: $NAMESPACE/" k8s/configmap.yaml | kubectl apply -f -
+          kubectl create configmap execution-service-messaging -n "$NAMESPACE" \
+            --from-literal=DYNAMODB_TABLE="${{ needs.terraform-apply.outputs.dynamodb_table_name }}" \
+            --from-literal=EXECUTION_COMMANDS_QUEUE_URL="${{ needs.terraform-apply.outputs.execution_commands_queue_url }}" \
+            --from-literal=EVENTS_TOPIC_ARN="${{ needs.terraform-apply.outputs.events_topic_arn }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deployment + Service + HPA + Ingress
+        run: |
+          sed \
+            -e "s/namespace: oficina$/namespace: $NAMESPACE/" \
+            -e "s|image: execution-service:local|image: ${{ needs.docker-build-push.outputs.image }}|" \
+            k8s/deployment.yaml | kubectl apply -f -
+          sed "s/namespace: oficina$/namespace: $NAMESPACE/" k8s/service.yaml | kubectl apply -f -
+          sed -e "s/namespace: oficina$/namespace: $NAMESPACE/" \
+              -e "s/oficina-ENV/oficina-${TF_ENV}/" k8s/ingress.yaml | kubectl apply -f -
+          sed "s/namespace: oficina$/namespace: $NAMESPACE/" k8s/hpa.yaml | kubectl apply -f -
+
+      - name: Forçar rollout
+        # Secret/ConfigMap podem mudar sem a imagem mudar; pods não reiniciam sozinhos.
+        run: kubectl rollout restart deployment/execution-service -n "$NAMESPACE"
+
+      - name: Aguardar rollout
+        run: kubectl rollout status deployment/execution-service -n "$NAMESPACE" --timeout=180s
+
+      - name: Smoke test /health/ready
+        run: |
+          kubectl port-forward svc/execution-service 3002:3002 -n "$NAMESPACE" &
+          sleep 5
+          curl --fail --retry 5 --retry-delay 3 --retry-connrefused http://localhost:3002/health/ready
+
+      - name: Estado do cluster (debug em caso de falha)
+        if: failure()
+        run: |
+          kubectl get all -n "$NAMESPACE"
+          kubectl describe pods -n "$NAMESPACE"
+          kubectl logs -l app=execution-service -n "$NAMESPACE" --tail=200

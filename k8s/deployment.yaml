@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: execution-service
+  namespace: oficina
+  labels:
+    app: execution-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: execution-service
+  template:
+    metadata:
+      labels:
+        app: execution-service
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: execution-service
+          # Substituída em tempo de deploy pelo CI/CD (sed na tag do ECR = SHA do commit).
+          image: execution-service:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3001
+          envFrom:
+            - configMapRef:
+                name: execution-service-config
+            # DYNAMODB_TABLE, EXECUTION_COMMANDS_QUEUE_URL, EVENTS_TOPIC_ARN — criado pelo CI
+            - configMapRef:
+                name: execution-service-messaging
+            - secretRef:
+                name: execution-service-secret
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+              ephemeral-storage: "512Mi"
+          readinessProbe:
+            # Consulta o DynamoDB: se estiver inalcançável, só tira o pod do Service.
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            # /health/live nunca toca dependências — reiniciar o pod não resolve problema de DynamoDB.
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
