@@ -1,0 +1,100 @@
+[
+  {
+    "messageId": "<uuid-1>",
+    "type": "DiagnosticoIniciado",
+    "version": 1,
+    "sagaId": "<uuid-1>",
+    "correlationId": "corr-1",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "payload": {
+      "ordemServicoId": "os-1",
+      "execucaoId": "<uuid-2>"
+    }
+  },
+  {
+    "messageId": "<uuid-1>",
+    "type": "DiagnosticoConcluido",
+    "version": 1,
+    "sagaId": "<uuid-1>",
+    "correlationId": "sem-correlation-id",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "payload": {
+      "ordemServicoId": "os-1",
+      "execucaoId": "<uuid-2>",
+      "servicos": [
+        {
+          "catalogoServicoId": "cat-1",
+          "pecas": [
+            {
+              "pecaId": "peca-1",
+              "quantidade": 2
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "messageId": "<uuid-1>",
+    "type": "ReparoIniciado",
+    "version": 1,
+    "sagaId": "<uuid-1>",
+    "correlationId": "corr-1",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "payload": {
+      "ordemServicoId": "os-1",
+      "execucaoId": "<uuid-2>"
+    }
+  },
+  {
+    "messageId": "<uuid-1>",
+    "type": "ReparoConcluido",
+    "version": 1,
+    "sagaId": "<uuid-1>",
+    "correlationId": "sem-correlation-id",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "payload": {
+      "ordemServicoId": "os-1",
+      "execucaoId": "<uuid-2>",
+      "observacoes": "tudo certo"
+    }
+  },
+  {
+    "messageId": "<uuid-1>",
+    "type": "DiagnosticoFalhou",
+    "version": 1,
+    "sagaId": "<uuid-1>",
+    "correlationId": "sem-correlation-id",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "payload": {
+      "ordemServicoId": "os-2",
+      "execucaoId": "<uuid-3>",
+      "motivo": "sem acesso ao veículo"
+    }
+  },
+  {
+    "messageId": "<uuid-1>",
+    "type": "ReparoFalhou",
+    "version": 1,
+    "sagaId": "<uuid-1>",
+    "correlationId": "sem-correlation-id",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "payload": {
+      "ordemServicoId": "os-3",
+      "execucaoId": "<uuid-4>",
+      "motivo": "motor fundido"
+    }
+  },
+  {
+    "messageId": "<uuid-1>",
+    "type": "ExecucaoCancelada",
+    "version": 1,
+    "sagaId": "<uuid-1>",
+    "correlationId": "corr-1",
+    "occurredAt": "2026-01-01T00:00:00.000Z",
+    "payload": {
+      "ordemServicoId": "os-3",
+      "execucaoId": "<uuid-4>"
+    }
+  }
+]
