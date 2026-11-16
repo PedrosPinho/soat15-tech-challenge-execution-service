@@ -5,9 +5,9 @@ Fila de execução da oficina: diagnóstico e reparo das ordens de serviço. Um 
 ([`soat15-tech-challenge-01`](https://github.com/PedrosPinho/soat15-tech-challenge-01),
 orquestrador da Saga) e do Billing Service.
 
-> **Status**: esqueleto (Etapa 1 do [`PHASE_4_PLAN`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/PHASE_4_PLAN.md)).
-> Estão prontos: estrutura DDD, healthchecks, logs com `correlationId`, Swagger,
-> Docker, CI (build + testes com cobertura ≥ 80%). Regras de negócio e mensageria entram nas Etapas 3 em diante.
+> **Status**: Etapa 3 do [`PHASE_4_PLAN`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/PHASE_4_PLAN.md) concluída —
+> domínio, repositório DynamoDB, outbox/inbox, consumidor de comandos, API do mecânico, Terraform, K8s e CI.
+> Pendente de validação em ambiente com Docker/AWS: o spec de integração com LocalStack e o `terraform apply`.
 
 ## Responsabilidades
 
@@ -29,7 +29,20 @@ mensagens e pelas rotas `/internal/*`.
 - Contratos, envelope e regras de consumo (idempotência, DLQ): [`contratos-mensagens.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/contratos-mensagens.md)
 - Saga **orquestrada** pelo OS Service — justificativa em [`ADR-009`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/adrs/ADR-009-saga-orquestrada.md) e [`RFC-005`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/rfcs/RFC-005-microsservicos-e-saga.md). Este serviço não conhece o fluxo global: recebe comandos e responde com eventos.
 
-## Endpoints (planejados)
+## Ciclo da execução
+
+```
+AGUARDANDO_DIAGNOSTICO → EM_DIAGNOSTICO → DIAGNOSTICADA → AGUARDANDO_REPARO → EM_REPARO → CONCLUIDA
+                              └──────────────────────────────────────────────┴──→ FALHOU
+  CANCELADA (a partir de qualquer estado não terminal, por CancelarExecucao)
+```
+
+- `SolicitarDiagnostico` cria a execução na fila (prioridade `ALTA` antes de `NORMAL`, depois ordem de chegada) e responde `DiagnosticoIniciado`.
+- O mecânico inicia/conclui o diagnóstico pela API; `DiagnosticoConcluido` leva os serviços (do catálogo) e as peças — a **precificação é do OS Service**.
+- `IniciarReparo` (após aprovação e pagamento) move para `AGUARDANDO_REPARO` e responde `ReparoIniciado`; o mecânico então inicia e conclui/falha o reparo (`ReparoConcluido` / `ReparoFalhou`).
+- `CancelarExecucao` é compensação idempotente: responde `ExecucaoCancelada` mesmo se a execução não existir ou já for terminal.
+
+## Endpoints
 
 | Método | Rota | Escopo | Descrição |
 |---|---|---|---|
@@ -37,11 +50,41 @@ mensagens e pelas rotas `/internal/*`.
 | GET | `/api/execucoes/:id` | interno | Execução + histórico |
 | PATCH | `/api/execucoes/:id/diagnostico/iniciar` | interno | Mecânico inicia o diagnóstico |
 | PATCH | `/api/execucoes/:id/diagnostico/concluir` | interno | Conclui, informando serviços/peças necessários |
+| PATCH | `/api/execucoes/:id/diagnostico/falhar` | interno | Reporta falha no diagnóstico (`DiagnosticoFalhou`) |
 | PATCH | `/api/execucoes/:id/reparo/iniciar` | interno | Inicia o reparo |
 | PATCH | `/api/execucoes/:id/reparo/concluir` | interno | Conclui o reparo |
 | PATCH | `/api/execucoes/:id/reparo/falhar` | interno | Reporta falha (dispara a compensação da Saga) |
 
 Swagger em `/api/execucoes/docs` (JSON em `/api/execucoes/docs.json`). Healthchecks: `GET /health/live`, `GET /health/ready`.
+
+## Confiabilidade (DynamoDB)
+
+Toda gravação é uma única `TransactWriteItems` com: estado da execução (lock otimista por `versao`),
+histórico (`EVT#<ts>`), mensagens do **outbox** e o item do **inbox** (`INBOX#<messageId>`, TTL de 7 dias).
+Logo, "mudou o estado mas não registrou o evento" não existe, e um comando repetido é descartado de forma atômica.
+O relay lê o outbox por um índice esparso (GSI3), reivindica cada item com um *lease* condicional
+(equivalente ao `SKIP LOCKED` do Postgres — 2 réplicas não publicam a mesma mensagem) e publica no SNS
+com backoff exponencial. Uma trava `OSLOCK#<osId>` garante uma execução por OS mesmo com comandos concorrentes.
+Modelo de chaves: [`keys.ts`](src/infrastructure/database/dynamodb/keys.ts).
+
+## Posição na solução
+
+```mermaid
+flowchart LR
+  OS[OS Service<br/>orquestrador] -- "SolicitarDiagnostico · IniciarReparo · CancelarExecucao" --> Q[[SQS execution-commands]] --> EX
+  Mecanico([Mecânico]) --> APIGW[API Gateway] --> ALB[ALB interno] --> EX
+  subgraph EX[Execution Service]
+    H[Handler de comandos] --> T[(DynamoDB<br/>execucoes)]
+    API["API /api/execucoes"] --> T
+    T --- OB["outbox (GSI3 esparso) → relay"]
+  end
+  EX -- "DiagnosticoIniciado/Concluido/Falhou<br/>ReparoIniciado/Concluido/Falhou<br/>ExecucaoCancelada" --> SNS{{SNS oficina-eventos}} --> OS
+```
+
+Sequência da Saga: [`sequence-saga-feliz.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/sequence-saga-feliz.md) ·
+[`sequence-saga-compensacao.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/sequence-saga-compensacao.md). Modelo single-table:
+[`data-model.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/data-model.md) (seção Execution).
+
 
 ## Arquitetura do serviço
 
@@ -63,19 +106,35 @@ Node.js 20 · TypeScript (strict) · Express 5 · DynamoDB (AWS SDK v3) · SQS/S
 
 ```bash
 cp .env.example .env
-docker compose up -d localstack            # SQS, SNS e DynamoDB locais
+docker compose up -d localstack            # SQS, SNS e DynamoDB locais (cria tabela, fila e tópico)
 npm ci
 npm run dev                                # http://localhost:3001
 ```
+
+Subir tudo (LocalStack + API, porta 3002): `docker compose up --build`. Modos: `MESSAGING_DRIVER=memory` roda sem AWS; `MESSAGING_ENABLED=false` roda só a API.
+
+Ambiente completo com os 3 serviços: `docker-compose.integration.yml` e `scripts/smoke-fluxo-feliz.sh` no repositório do OS Service.
 
 Testes: `npm test` · cobertura: `npm run test:coverage` (threshold 80%) · lint: `npm run lint` · tipos: `npm run type-check`.
 
 ## Qualidade, CI/CD e cobertura
 
-- CI em GitHub Actions (`.github/workflows/ci-cd.yml`): `Build` (tipos, lint, build) e `Test` (cobertura com threshold de 80%).
-- Etapa 8: SonarCloud com quality gate, Terraform do serviço, build/push no ECR e deploy no EKS.
-- Evidência de cobertura: _a preencher_ (badge SonarCloud + relatório do CI).
-- `main` e `homolog` protegidas: PR obrigatório e status checks `Build` e `Test`.
+- CI em GitHub Actions (`.github/workflows/ci-cd.yml`): `Build` (tipos, lint, build), `Test` (cobertura com threshold de 80%) e `Sonar` (SonarCloud; o passo espera o quality gate). Em PR roda também `Terraform plan`; em push (`homolog`) `terraform apply` → build/push no ECR → deploy.
+- Jobs de infraestrutura: `terraform-validate` (fmt + validate), `terraform-apply` (ECR, tabela, fila + DLQ; `apply` só em `homolog`, `plan` em `main` — ADR-007), `docker-build-push` (ECR) e `deploy` (EKS). SonarCloud entra na Etapa 8.
+- `tests/integration-localstack.spec.ts` roda contra DynamoDB/SQS/SNS reais (service container do LocalStack no CI; localmente defina `LOCALSTACK_ENDPOINT=http://localhost:4566`).
+- Infra do serviço em [`terraform/`](terraform) (estado remoto S3, workspaces `homolog`/`prod`) e manifests em [`k8s/`](k8s). Requer o `apply` prévio do OS Service (dono do tópico `oficina-eventos`).
+- Evidência de cobertura: _a preencher_ (quality gate do SonarQube local (`../soat15-tech-challenge-01/scripts/sonar-local.sh`) + relatório do CI).
+- `main` e `homolog` protegidas: PR obrigatório e status checks `Build`, `Test` e `Sonar` (`scripts/protect-branches.sh` no repo do OS Service aplica). `destroy.yml` (manual) remove workloads e infra do serviço.
+
+## Cobertura e documentação da API
+
+- **Cobertura**: 99,6 % de linhas · 93,2 % de branches · 98,0 % de funções (`npm run test:coverage`, sem o teste de integração
+  com LocalStack; mínimo exigido 80 %). O CI publica o relatório e o SonarQube local (`scripts/sonar-local.sh` do repo OS) aplica o quality gate.
+- **Contratos**: `tests/contracts/` — consome os comandos reais do OS (`os-commands.json`) e produz os eventos que o OS consome
+  (`execution-events.json`); ver o README do OS Service, seção Testes.
+- **Swagger**: `/api/execucoes/docs`. **Postman do fluxo completo** (3 serviços, variáveis encadeadas):
+  [`oficina-fase4-fluxo-completo.postman_collection.json`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/postman/oficina-fase4-fluxo-completo.postman_collection.json).
+
 
 ## Documentação da arquitetura
 
