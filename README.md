@@ -123,13 +123,13 @@ Testes: `npm test` · cobertura: `npm run test:coverage` (threshold 80%) · lint
 - Jobs de infraestrutura: `terraform-validate` (fmt + validate), `terraform-apply` (ECR, tabela, fila + DLQ; `apply` só em `homolog`, `plan` em `main` — ADR-007), `docker-build-push` (ECR) e `deploy` (EKS). SonarCloud entra na Etapa 8.
 - `tests/integration-localstack.spec.ts` roda contra DynamoDB/SQS/SNS reais (service container do LocalStack no CI; localmente defina `LOCALSTACK_ENDPOINT=http://localhost:4566`).
 - Infra do serviço em [`terraform/`](terraform) (estado remoto S3, workspaces `homolog`/`prod`) e manifests em [`k8s/`](k8s). Requer o `apply` prévio do OS Service (dono do tópico `oficina-eventos`).
-- Evidência de cobertura: _a preencher_ (badge SonarCloud + relatório do CI).
+- Evidência de cobertura: _a preencher_ (quality gate do SonarQube local (`../soat15-tech-challenge-01/scripts/sonar-local.sh`) + relatório do CI).
 - `main` e `homolog` protegidas: PR obrigatório e status checks `Build`, `Test` e `Sonar` (`scripts/protect-branches.sh` no repo do OS Service aplica). `destroy.yml` (manual) remove workloads e infra do serviço.
 
 ## Cobertura e documentação da API
 
 - **Cobertura**: 99,6 % de linhas · 93,2 % de branches · 98,0 % de funções (`npm run test:coverage`, sem o teste de integração
-  com LocalStack; mínimo exigido 80 %). O CI publica o relatório e o SonarCloud aplica o quality gate.
+  com LocalStack; mínimo exigido 80 %). O CI publica o relatório e o SonarQube local (`scripts/sonar-local.sh` do repo OS) aplica o quality gate.
 - **Contratos**: `tests/contracts/` — consome os comandos reais do OS (`os-commands.json`) e produz os eventos que o OS consome
   (`execution-events.json`); ver o README do OS Service, seção Testes.
 - **Swagger**: `/api/execucoes/docs`. **Postman do fluxo completo** (3 serviços, variáveis encadeadas):
